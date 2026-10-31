@@ -1,5 +1,7 @@
 #include "HeltecV4Board.h"
 
+#include <math.h>
+
 void HeltecV4Board::begin() {
     ESP32Board::begin();
 
@@ -80,6 +82,17 @@ void HeltecV4Board::begin() {
 void HeltecV4Board::attachDynamicPrefs(KeyValueStore* prefs) {
   _prefs = prefs;
 
+  char adc_mult_str[16] = { 0 };
+  if (_prefs->getByKey("adc_mult", adc_mult_str, sizeof(adc_mult_str) - 1)) {
+      char* end = nullptr;
+      float multiplier = strtof(adc_mult_str, &end);
+
+      if (end != adc_mult_str && *end == '\0' &&
+          isfinite(multiplier) && multiplier >= 0.0f && multiplier <= 10.0f) {
+          setAdcMultiplier(multiplier);
+      }
+  }
+
   char radio_fem_rxgain[8] = { 0 };
   _prefs->getByKey("fem_rxgain", radio_fem_rxgain, 7);  // get initial values
 
@@ -87,6 +100,88 @@ void HeltecV4Board::attachDynamicPrefs(KeyValueStore* prefs) {
 }
 
 bool HeltecV4Board::handleCommand(const char* command, uint32_t sender_timestamp, char* reply) {
+  if (strcmp(command, "get adc.multiplier") == 0) {
+    sprintf(reply, "> %.4f", getAdcMultiplier());
+    return true;
+  }
+
+  if (memcmp(command, "set adc.multiplier ", 19) == 0) {
+    const char* value_str = command + 19;
+    char* end = nullptr;
+    float multiplier = strtof(value_str, &end);
+    if (end == value_str || *end != '\0' ||
+        !isfinite(multiplier) || multiplier < 0.0f || multiplier > 10.0f) {
+      strcpy(reply, "Error: multiplier must be 0-10");
+      return true;
+    }
+    if (_prefs == nullptr) {
+      strcpy(reply, "Error: preferences unavailable");
+      return true;
+    }
+    float previous = getAdcMultiplier();
+    if (!setAdcMultiplier(multiplier)) {
+      strcpy(reply, "Error: unsupported");
+      return true;
+    }
+    char saved_value[16];
+    snprintf(saved_value, sizeof(saved_value), "%.4f", multiplier);
+    if (!_prefs->setByKey("adc_mult", saved_value)) {
+      setAdcMultiplier(previous);
+      strcpy(reply, "Error: failed to save multiplier");
+      return true;
+    }
+    if (multiplier == 0.0f) {
+      strcpy(reply, "OK - using default board multiplier");
+    } else {
+      sprintf(reply, "OK - multiplier set to %.4f", multiplier);
+    }
+    return true;
+  }
+
+  if (strcmp(command, "get pwrmgt.bootreason") == 0) {
+    const char* reason_str = "unknown";
+    switch (esp_reset_reason()) {
+      case ESP_RST_UNKNOWN:
+        reason_str = "unknown";
+        break;
+      case ESP_RST_POWERON:
+        reason_str = "power-on";
+        break;
+      case ESP_RST_EXT:
+        reason_str = "external reset";
+        break;
+      case ESP_RST_SW:
+        reason_str = "software reset";
+        break;
+      case ESP_RST_PANIC:
+        reason_str = "panic";
+        break;
+      case ESP_RST_INT_WDT:
+        reason_str = "interrupt watchdog";
+        break;
+      case ESP_RST_TASK_WDT:
+        reason_str = "task watchdog";
+        break;
+      case ESP_RST_WDT:
+        reason_str = "watchdog";
+        break;
+      case ESP_RST_DEEPSLEEP:
+        reason_str = "deep sleep wakeup";
+        break;
+      case ESP_RST_BROWNOUT:
+        reason_str = "brownout";
+        break;
+      case ESP_RST_SDIO:
+        reason_str = "SDIO reset";
+        break;
+      default:
+        reason_str = "other";
+        break;
+    }
+    sprintf(reply, "> %s", reason_str);
+    return true;
+  }
+
   if (strcmp(command, "get radio.fem.rxgain") == 0) {
     if (!loRaFEMControl.isLnaCanControl()) {
       strcpy(reply, "Error: unsupported");
