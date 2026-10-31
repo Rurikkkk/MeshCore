@@ -5,6 +5,7 @@
 #include <WiFi.h>
 #endif
 #include <Mesh.h>
+#include <math.h>
 
 #define CMD_APP_START                 1
 #define CMD_SEND_TXT_MSG              2
@@ -2206,6 +2207,269 @@ bool MyMesh::handleCommand(const char* command, uint32_t sender_timestamp, char*
     }
     return true;
   }
+
+  if (strcmp(command, "advert.zerohop") == 0) {
+    if (advert()) {
+      strcpy(reply, "OK - zerohop advert sent");
+    } else {
+      strcpy(reply, "Error: unable to create advert");
+    }
+    return true;
+  }
+
+  if (strcmp(command, "advert") == 0) {
+    mesh::Packet* pkt;
+    if (_prefs.advert_loc_policy == ADVERT_LOC_NONE) {
+      pkt = createSelfAdvert(_prefs.node_name);
+    } else {
+      pkt = createSelfAdvert(_prefs.node_name, sensors.node_lat, sensors.node_lon);
+    }
+    if (pkt) {
+      TransportKey default_scope;
+      memcpy(&default_scope.key, _prefs.default_scope_key, sizeof(default_scope.key));
+      sendFloodScoped(default_scope, pkt, 1500);
+      strcpy(reply, "OK - Advert sent");
+    } else {
+      strcpy(reply, "Error: unable to create advert");
+    }
+    return true;
+  }
+
+  if (strcmp(command, "get public.key") == 0) {
+    char pubkey_hex[PUB_KEY_SIZE * 2 + 1];
+    mesh::Utils::toHex(pubkey_hex, self_id.pub_key, PUB_KEY_SIZE);
+    snprintf(reply, 160, "> %s", pubkey_hex);
+    return true;
+  }
+
+  if (strcmp(command, "power") == 0) {
+    const char* usb_state = board.hasUsbPowerDetect()
+      ? (board.isUsbPowered() ? "yes" : "no") : "n/a";
+
+    const char* solar_state = board.hasSolarChargerDetect()
+      ? (board.isSolarChargerActive() ? "yes" : "no") : "n/a";
+
+    snprintf(reply, 160,
+             "batt:%u mV usb:%s solar_chg:%s ext:%s charger:%s",
+             (unsigned)board.getBattMilliVolts(),
+             usb_state,
+             solar_state,
+             board.isExternalPowered() ? "yes" : "no",
+             board.isChargerActive() ? "yes" : "no");
+    return true;
+  }
+
+  if (strcmp(command, "stats-packets") == 0) {
+    if (sender_timestamp != 0) {
+      strcpy(reply, "Error: local CLI only");
+      return true;
+    }
+    uint32_t recv = radio_driver.getPacketsRecv();
+    uint32_t sent = radio_driver.getPacketsSent();
+    uint32_t sent_flood = getNumSentFlood();
+    uint32_t sent_direct = getNumSentDirect();
+    uint32_t recv_flood = getNumRecvFlood();
+    uint32_t recv_direct = getNumRecvDirect();
+    uint32_t recv_errors = radio_driver.getPacketsRecvErrors();
+    snprintf(reply, 160,
+             "rx:%lu tx:%lu tx_flood:%lu tx_direct:%lu "
+             "rx_flood:%lu rx_direct:%lu rx_err:%lu",
+             (unsigned long)recv,
+             (unsigned long)sent,
+             (unsigned long)sent_flood,
+             (unsigned long)sent_direct,
+             (unsigned long)recv_flood,
+             (unsigned long)recv_direct,
+             (unsigned long)recv_errors);
+    return true;
+  }
+
+  if (strcmp(command, "stats-radio") == 0) {
+    if (sender_timestamp != 0) {
+      strcpy(reply, "Error: local CLI only");
+      return true;
+    }
+    int noise_floor = (int)_radio->getNoiseFloor();
+    int last_rssi = (int)radio_driver.getLastRSSI();
+    float last_snr = radio_driver.getLastSNR();
+    uint32_t tx_air_secs = getTotalAirTime() / 1000;
+    uint32_t rx_air_secs = getReceiveAirTime() / 1000;
+    snprintf(reply, 160,
+             "noise:%d dBm rssi:%d dBm snr:%.2f dB tx:%lu s rx:%lu s",
+             noise_floor,
+             last_rssi,
+             last_snr,
+             (unsigned long)tx_air_secs,
+             (unsigned long)rx_air_secs);
+    return true;
+  }
+
+  if (strcmp(command, "stats-core") == 0) {
+    if (sender_timestamp != 0) {
+      strcpy(reply, "Error: local CLI only");
+      return true;
+    }
+    uint16_t battery_mv = board.getBattMilliVolts();
+    uint32_t uptime_secs = _ms->getMillis() / 1000;
+    uint8_t queue_len = (uint8_t)_mgr->getOutboundTotal();
+    snprintf(reply, 160,
+             "batt:%u mV uptime:%lu s err:0x%04X queue:%u",
+             (unsigned)battery_mv,
+             (unsigned long)uptime_secs,
+             (unsigned)_err_flags,
+             (unsigned)queue_len);
+    return true;
+  }
+
+  if (strcmp(command, "get lat") == 0) {
+    snprintf(reply, 160, "> %.6f", sensors.node_lat);
+    return true;
+  }
+
+  if (strcmp(command, "get lon") == 0) {
+    snprintf(reply, 160, "> %.6f", sensors.node_lon);
+    return true;
+  }
+
+  if (memcmp(command, "set lat ", 8) == 0) {
+    const char* value_str = command + 8;
+    char* end = nullptr;
+    double value = strtod(value_str, &end);
+    if (end == value_str || *end != '\0' ||
+        !isfinite(value) || value < -90.0 || value > 90.0) {
+      strcpy(reply, "Error: latitude must be -90..90");
+      return true;
+    }
+    sensors.node_lat = value;
+    savePrefs();
+    strcpy(reply, "OK");
+    return true;
+  }
+
+  if (memcmp(command, "set lon ", 8) == 0) {
+    const char* value_str = command + 8;
+    char* end = nullptr;
+    double value = strtod(value_str, &end);
+    if (end == value_str || *end != '\0' ||
+        !isfinite(value) || value < -180.0 || value > 180.0) {
+      strcpy(reply, "Error: longitude must be -180..180");
+      return true;
+    }
+    sensors.node_lon = value;
+    savePrefs();
+    strcpy(reply, "OK");
+    return true;
+  }
+
+#if ENV_INCLUDE_GPS == 1
+
+  if (strcmp(command, "gps on") == 0) {
+    if (sensors.setSettingValue("gps", "1")) {
+      _prefs.gps_enabled = 1;
+      savePrefs();
+      strcpy(reply, "ok");
+    } else {
+      strcpy(reply, "gps toggle not found");
+    }
+    return true;
+  }
+
+  if (strcmp(command, "gps off") == 0) {
+    if (sensors.setSettingValue("gps", "0")) {
+      _prefs.gps_enabled = 0;
+      savePrefs();
+      strcpy(reply, "ok");
+    } else {
+      strcpy(reply, "gps toggle not found");
+    }
+    return true;
+  }
+
+  if (strcmp(command, "gps sync") == 0) {
+    auto* gps = sensors.getLocationProvider();
+    if (gps != nullptr) {
+      gps->syncTime();
+      strcpy(reply, "ok");
+    } else {
+      strcpy(reply, "gps provider not found");
+    }
+    return true;
+  }
+
+  if (strcmp(command, "gps diag") == 0) {
+    auto* gps = sensors.getLocationProvider();
+    if (gps != nullptr) {
+      const char* setting = sensors.getSettingByKey("gps");
+      bool requested = setting != nullptr && strcmp(setting, "1") == 0;
+      int prefix_len = snprintf(reply, 160, "req:%u ", requested ? 1U : 0U);
+      if (prefix_len < 0 || prefix_len >= 160) {
+        reply[159] = '\0';
+      } else {
+        gps->formatDiagnostics(reply + prefix_len, 160 - prefix_len);
+      }
+    } else {
+      strcpy(reply, "gps provider not found");
+    }
+    return true;
+  }
+
+  if (strcmp(command, "gps setloc") == 0) {
+    savePrefs();
+    strcpy(reply, "ok");
+    return true;
+  }
+
+  if (strcmp(command, "gps advert") == 0) {
+    switch (_prefs.advert_loc_policy) {
+      case ADVERT_LOC_NONE:
+        strcpy(reply, "> none");
+        break;
+      case ADVERT_LOC_SHARE:
+        strcpy(reply, "> share");
+        break;
+      default:
+        strcpy(reply, "> unknown");
+        break;
+    }
+    return true;
+  }
+
+  if (memcmp(command, "gps advert ", 11) == 0) {
+    const char* policy = command + 11;
+    if (strcmp(policy, "none") == 0) {
+      _prefs.advert_loc_policy = ADVERT_LOC_NONE;
+    } else if (strcmp(policy, "share") == 0) {
+      _prefs.advert_loc_policy = ADVERT_LOC_SHARE;
+    } else {
+      strcpy(reply, "Error: policy must be none or share");
+      return true;
+    }
+    savePrefs();
+    strcpy(reply, "ok");
+    return true;
+  }
+
+  if (strcmp(command, "gps") == 0) {
+    auto* gps = sensors.getLocationProvider();
+    if (gps != nullptr) {
+      const char* setting = sensors.getSettingByKey("gps");
+      bool active = setting != nullptr && strcmp(setting, "1") == 0;
+
+      if (gps->isEnabled()) {
+        snprintf(reply, 160, "on, %s, %s, %d sats",
+                 active ? "active" : "deactivated",
+                 gps->isValid() ? "fix" : "no fix",
+                 gps->satellitesCount());
+      } else {
+        strcpy(reply, "off");
+      }
+    } else {
+      strcpy(reply, "Can't find GPS");
+    }
+    return true;
+  }
+
+#endif
 
   return false;  // not handled
 }
