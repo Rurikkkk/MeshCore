@@ -80,6 +80,16 @@ void HeltecV4Board::begin() {
 void HeltecV4Board::attachDynamicPrefs(KeyValueStore* prefs) {
   _prefs = prefs;
 
+  char adc_mult_str[16] = { 0 };
+  if (_prefs->getByKey("adc_mult", adc_mult_str, sizeof(adc_mult_str) - 1)) {
+      char* end = nullptr;
+      float multiplier = strtof(adc_mult_str, &end);
+
+      if (end != adc_mult_str && *end == '\0' && isfinite(multiplier)) {
+          setAdcMultiplier(multiplier);
+      }
+  }
+
   char radio_fem_rxgain[8] = { 0 };
   _prefs->getByKey("fem_rxgain", radio_fem_rxgain, 7);  // get initial values
 
@@ -87,9 +97,49 @@ void HeltecV4Board::attachDynamicPrefs(KeyValueStore* prefs) {
 }
 
 bool HeltecV4Board::handleCommand(const char* command, uint32_t sender_timestamp, char* reply) {
+  if (strcmp(command, "get adc.multiplier") == 0) {
+    sprintf(reply, "> %.4f", getAdcMultiplier());
+    return true;
+  }
+
+  if (memcmp(command, "set adc.multiplier ", 19) == 0) {
+    const char* value_str = command + 19;
+    char* end = nullptr;
+    float multiplier = strtof(value_str, &end);
+    if (end == value_str || *end != '\0' || !isfinite(multiplier)) {
+      strcpy(reply, "> Error: invalid value");
+      return true;
+    }
+    float previous = getAdcMultiplier();
+    if (!setAdcMultiplier(multiplier)) {
+      strcpy(reply, "> Error: unsupported");
+      return true;
+    }
+    char saved_value[16];
+    snprintf(saved_value, sizeof(saved_value), "%.4f", multiplier);
+    if (!_prefs->setByKey("adc_mult", saved_value)) {
+      setAdcMultiplier(previous);
+      strcpy(reply, "> Error: failed to save multiplier");
+      return true;
+    }
+    if (multiplier == 0.0f) {
+      sprintf(reply, "> OK, using default board multiplier (%.4f)", ADC_MULTIPLIER);
+    } else {
+      sprintf(reply, "> OK", multiplier);
+    }
+    return true;
+  }
+
+  if (strcmp(command, "get pwrmgt.bootreason") == 0) {
+    uint32_t reason = getResetReason();
+    const char* reason_str = getResetReasonString(reason);
+    sprintf(reply, "> %s", reason_str);
+    return true;
+  }
+
   if (strcmp(command, "get radio.fem.rxgain") == 0) {
     if (!loRaFEMControl.isLnaCanControl()) {
-      strcpy(reply, "Error: unsupported");
+      strcpy(reply, "> Error: unsupported");
     } else {
       sprintf(reply, "> %s", isLoRaFemLnaEnabled() ? "on" : "off");
     }
@@ -97,23 +147,23 @@ bool HeltecV4Board::handleCommand(const char* command, uint32_t sender_timestamp
   }
   if (memcmp(command, "set radio.fem.rxgain ", 21) == 0) {
     if (!loRaFEMControl.isLnaCanControl()) {
-      strcpy(reply, "Error: unsupported");
+      strcpy(reply, "> Error: unsupported");
     } else if (memcmp(&command[21], "on", 2) == 0) {
       if (setLoRaFemLnaEnabled(true)) {
         _prefs->setByKey("fem_rxgain", "1");
-        strcpy(reply, "OK - LoRa FEM RX gain on");
+        strcpy(reply, "> OK");
       } else {
-        strcpy(reply, "Error: failed to apply LoRa FEM RX gain");
+        strcpy(reply, "> Error: failed to apply LoRa FEM RX gain");
       }
     } else if (memcmp(&command[21], "off", 3) == 0) {
       if (setLoRaFemLnaEnabled(false)) {
         _prefs->setByKey("fem_rxgain", "0");
-        strcpy(reply, "OK - LoRa FEM RX gain off");
+        strcpy(reply, "> OK");
       } else {
-        strcpy(reply, "Error: failed to apply LoRa FEM RX gain");
+        strcpy(reply, "> Error: failed to apply LoRa FEM RX gain");
       }
     } else {
-      strcpy(reply, "Error: state must be on or off");
+      strcpy(reply, "> Error: state must be on or off");
     }
     return true;
   }
