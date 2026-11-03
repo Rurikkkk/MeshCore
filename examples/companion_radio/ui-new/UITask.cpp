@@ -123,10 +123,14 @@ class HomeScreen : public UIScreen {
   bool discovery_disp_names = true; // by default desplay names if available (removes SNR_O)
 #endif
 
-  void renderBatteryIndicator(DisplayDriver& display, uint16_t batteryMilliVolts) {
+  int renderBatteryIndicator(DisplayDriver& display, uint16_t batteryMilliVolts) {
     // Convert millivolts to percentage
 #ifndef BATT_MIN_MILLIVOLTS
-  #define BATT_MIN_MILLIVOLTS 3000
+  #ifdef AUTO_SHUTDOWN_MILLIVOLTS
+    #define BATT_MIN_MILLIVOLTS AUTO_SHUTDOWN_MILLIVOLTS
+  #else
+    #define BATT_MIN_MILLIVOLTS 3000
+  #endif
 #endif
 #ifndef BATT_MAX_MILLIVOLTS
   #define BATT_MAX_MILLIVOLTS 4200
@@ -154,6 +158,17 @@ class HomeScreen : public UIScreen {
     int fillWidth = (batteryPercentage * (iconWidth - 4)) / 100;
     display.fillRect(iconX + 2, iconY + 2, fillWidth, iconHeight - 4);
 
+    // battery percentage text indication
+    char percentText[5];
+    snprintf(percentText, sizeof(percentText), "%d%%", batteryPercentage);
+    display.setTextSize(1);
+    int textWidth = display.getTextWidth(percentText);
+    int textX = iconX - 3 - textWidth;
+    display.setColor(UIColor::title_txt);
+    display.setCursor(textX, 1);
+    display.print(percentText);
+    int statusBarLeftX = textX;
+
     // while charging, show a bolt (or a plug once full) just left of the battery,
     // keeping the fill bar itself clean and uninterrupted
     bool charging = board.isExternalPowered();
@@ -163,7 +178,8 @@ class HomeScreen : public UIScreen {
       const int BATT_FULL_PCT = 95;
       const uint8_t* symbol = (batteryPercentage >= BATT_FULL_PCT) ? plug_icon : charging_icon;
       display.setColor(UIColor::title_txt);
-      display.drawXbm(iconX - 9, iconY + 1, symbol, 8, 8);
+      display.drawXbm(textX - 9, iconY + 1, symbol, 8, 8);
+      statusBarLeftX = textX - 9;
     }
 
     // show muted icon if buzzer is muted (shifted further left when the charging
@@ -171,9 +187,12 @@ class HomeScreen : public UIScreen {
 #ifdef PIN_BUZZER
     if (_task->isBuzzerQuiet()) {
       display.setColor(UIColor::warning_txt);
-      display.drawXbm(iconX - (charging ? 18 : 9), iconY + 1, muted_icon, 8, 8);
+      display.drawXbm(textX - (charging ? 18 : 9), iconY + 1, muted_icon, 8, 8);
+      statusBarLeftX = textX - (charging ? 18 : 9);
     }
 #endif
+
+    return statusBarLeftX;
   }
 
   CayenneLPP sensors_lpp;
@@ -252,16 +271,17 @@ public:
     display.setColor(UIColor::title_bkg);
     display.fillRect(0, 0, display.width(), 12);
     char tmp[80];
+
+    // battery voltage
+    // store left border of status bar to limit node name length
+    int statusBarLeftX = renderBatteryIndicator(display, _task->getBattMilliVolts());
+
     // node name
     display.setTextSize(1);
     display.setColor(UIColor::title_txt);
     char filtered_name[sizeof(_node_prefs->node_name)];
     display.translateUTF8ToBlocks(filtered_name, _node_prefs->node_name, sizeof(filtered_name));
-    display.setCursor(0, 2);
-    display.print(filtered_name);
-
-    // battery voltage
-    renderBatteryIndicator(display, _task->getBattMilliVolts());
+    display.drawTextEllipsized(0, 2, statusBarLeftX - 5, filtered_name);
 
     // curr page indicator
     if (UIColor::title_bkg == UIColor::window_bkg) {
